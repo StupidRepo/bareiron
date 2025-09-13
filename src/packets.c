@@ -434,9 +434,39 @@ int sc_keepAlive (int client_fd) {
   return 0;
 }
 
+#ifdef USE_ITEMSTACKS
+int sc_setContainerSlot (int client_fd, int window_id, uint16_t slot, ItemStack item) {
+  printf("setting slot");
+  writeVarInt(client_fd,
+    1 +
+    sizeVarInt(window_id) +
+    1 + 2 +
+    sizeVarInt(item.count) +
+    (item.count > 0 ? sizeVarInt(item.protocol_id) + 3 + sizeVarInt(item.damage) : 0)
+  );
+  writeByte(client_fd, 0x14);
+
+  writeVarInt(client_fd, window_id);
+  writeVarInt(client_fd, 0);
+  writeUint16(client_fd, slot);
+
+  writeVarInt(client_fd, item.count);
+  if (item.count > 0) {
+    writeVarInt(client_fd, item.protocol_id);
+
+    writeVarInt(client_fd, 1); // number of components to add
+    writeVarInt(client_fd, 0);
+
+    writeVarInt(client_fd, 3);
+    writeVarInt(client_fd, item.damage);
+  }
+
+  return 0;
+
+}
+#else
 // S->C Set Container Slot
 int sc_setContainerSlot (int client_fd, int window_id, uint16_t slot, uint8_t count, uint16_t item) {
-
   writeVarInt(client_fd,
     1 +
     sizeVarInt(window_id) +
@@ -453,13 +483,14 @@ int sc_setContainerSlot (int client_fd, int window_id, uint16_t slot, uint8_t co
   writeVarInt(client_fd, count);
   if (count > 0) {
     writeVarInt(client_fd, item);
-    writeVarInt(client_fd, 0);
-    writeVarInt(client_fd, 0);
+    writeVarInt(client_fd, 0); // components to add
+    writeVarInt(client_fd, 0); // components to remove
   }
 
   return 0;
 
 }
+#endif
 
 // S->C Block Update
 int sc_blockUpdate (int client_fd, int64_t x, int64_t y, int64_t z, uint8_t block) {
@@ -588,7 +619,11 @@ int cs_clickContainer (int client_fd) {
   if (mode == 4 && clicked_slot != -999) {
     // when using drop button, re-sync the respective slot
     uint8_t slot = clientSlotToServerSlot(window_id, clicked_slot);
+#ifdef USE_ITEMSTACKS
+    sc_setContainerSlot(client_fd, window_id, clicked_slot, player->inventory[slot]);
+#else
     sc_setContainerSlot(client_fd, window_id, clicked_slot, player->inventory_count[slot], player->inventory_items[slot]);
+#endif
     apply_changes = false;
   } else if (mode == 0 && clicked_slot == -999) {
     // when clicking outside inventory, return the dropped item to the player
@@ -632,8 +667,13 @@ int cs_clickContainer (int client_fd) {
     } else
     #endif
     {
+      #ifdef USE_ITEMSTACKS
+      p_item = &player->inventory[slot].protocol_id;
+      p_count = &player->inventory[slot].count;
+      #else
       p_item = &player->inventory_items[slot];
       p_count = &player->inventory_count[slot];
+      #endif
     }
 
     if (!readByte(client_fd)) { // no item?
@@ -654,9 +694,17 @@ int cs_clickContainer (int client_fd) {
 
     // ignore components
     tmp = readVarInt(client_fd);
-    recv_all(client_fd, recv_buffer, tmp, false);
+    printf("Components: %d\n", tmp);
+    for (int j = 0; j < tmp; j ++) {
+      readVarInt(client_fd); // type
+      readUint32(client_fd); // hash
+    }
+
     tmp = readVarInt(client_fd);
-    recv_all(client_fd, recv_buffer, tmp, false);
+    printf("Components to remove: %d\n", tmp);
+    for (int j = 0; j < tmp; j ++) {
+      readVarInt(client_fd); // type
+    }
 
     if (count > 0 && apply_changes) {
       *p_item = item;
@@ -673,11 +721,19 @@ int cs_clickContainer (int client_fd) {
   // window 0 is player inventory, window 12 is crafting table
   if (craft && (window_id == 0 || window_id == 12)) {
     getCraftingOutput(player, &count, &item);
+#ifdef USE_ITEMSTACKS
+    sc_setContainerSlot(client_fd, window_id, 0, (ItemStack){item, count, 0});
+#else
     sc_setContainerSlot(client_fd, window_id, 0, count, item);
+#endif
   } else if (window_id == 14) { // furnace
     getSmeltingOutput(player);
     for (int i = 0; i < 3; i ++) {
+#ifdef USE_ITEMSTACKS
+      sc_setContainerSlot(client_fd, window_id, i, player->crafting[i]);
+#else
       sc_setContainerSlot(client_fd, window_id, i, player->craft_count[i], player->craft_items[i]);
+#endif
     }
   }
 
@@ -685,11 +741,18 @@ int cs_clickContainer (int client_fd) {
   if (readByte(client_fd)) {
     player->flagval_16 = readVarInt(client_fd);
     player->flagval_8 = readVarInt(client_fd);
+
     // ignore components
     tmp = readVarInt(client_fd);
-    recv_all(client_fd, recv_buffer, tmp, false);
+    for (int j = 0; j < tmp; j ++) {
+      readVarInt(client_fd); // type
+      readUint32(client_fd); // hash
+    }
+
     tmp = readVarInt(client_fd);
-    recv_all(client_fd, recv_buffer, tmp, false);
+    for (int j = 0; j < tmp; j ++) {
+      readVarInt(client_fd); // type
+    }
   } else {
     player->flagval_16 = 0;
     player->flagval_8 = 0;
@@ -795,6 +858,15 @@ int cs_closeContainer (int client_fd) {
   // return all items in crafting slots to the player
   // or, in the case of chests, simply clear the storage pointer
   for (uint8_t i = 0; i < 9; i ++) {
+#ifdef USE_ITEMSTACKS
+    if (window_id != 2) {
+      givePlayerItem(player, player->crafting[i].protocol_id, player->crafting[i].count);
+      uint8_t client_slot = serverSlotToClientSlot(window_id, 41 + i);
+      if (client_slot != 255) sc_setContainerSlot(player->client_fd, window_id, client_slot, (ItemStack){0, 0, 0});
+    }
+
+    player->crafting[i] = (ItemStack){0, 0, 0};
+#else
     if (window_id != 2) {
       givePlayerItem(player, player->craft_items[i], player->craft_count[i]);
       uint8_t client_slot = serverSlotToClientSlot(window_id, 41 + i);
@@ -802,6 +874,7 @@ int cs_closeContainer (int client_fd) {
     }
     player->craft_items[i] = 0;
     player->craft_count[i] = 0;
+#endif
   }
 
   givePlayerItem(player, player->flagval_16, player->flagval_8);

@@ -125,11 +125,17 @@
 // Somewhat computationally expensive and potentially unstable
 #define DO_FLUID_FLOW
 
+// If USE_ITEMSTACKS is enabled, ItemStack is used to represent items
+// in inventories. This uses 5 bytes per item, making it a bit more
+// memory-intensive, but allows for future expansion and more accurate item
+// representation.
+#define USE_ITEMSTACKS
+
 // If defined, allows players to craft and use chests.
 // Chests take up 15 block change slots each, require additional checks,
 // and use some terrible memory hacks to function. On some platforms, this
 // could cause bad performance or even crashes during gameplay.
-#define ALLOW_CHESTS
+// #define ALLOW_CHESTS
 
 // If defined, enables flight for all players. As a side-effect, allows
 // players to sprint when starving.
@@ -191,6 +197,20 @@ typedef struct {
 
 #pragma pack(push, 1)
 
+#ifdef USE_ITEMSTACKS
+typedef struct {
+  uint8_t type;
+  uint32_t value;
+} Component;
+
+typedef struct {
+  uint16_t protocol_id;
+
+  uint8_t count;
+  uint16_t damage;
+} ItemStack;
+#endif
+
 typedef struct {
   uint8_t uuid[16];
   char name[16];
@@ -210,10 +230,15 @@ typedef struct {
   uint8_t hunger;
   uint16_t saturation;
   uint8_t hotbar;
+#ifndef USE_ITEMSTACKS
   uint16_t inventory_items[41];
   uint16_t craft_items[9];
   uint8_t inventory_count[41];
   uint8_t craft_count[9];
+#else
+  ItemStack inventory[41];
+  ItemStack crafting[9];
+#endif
   // Usage depends on player's flags, see below
   // When no flags are set, acts as cursor item ID
   uint16_t flagval_16;

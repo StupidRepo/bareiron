@@ -84,6 +84,8 @@ async function extractItemsAndBlocks () {
   const itemSource = registriesJSON["minecraft:item"].entries;
   // Retrieve the registry list for blocks too, used later in tags
   const blockRegistrySource = registriesJSON["minecraft:block"].entries;
+  // And also component types, used for the optional ItemStack system
+  const componentSource = registriesJSON["minecraft:data_component_type"].entries;
 
   // Sort blocks by their network ID
   // Since we're only storing 256 blocks, this prioritizes the "common" ones first
@@ -97,7 +99,7 @@ async function extractItemsAndBlocks () {
   });
 
   // Create name-id pair objects for easier parsing
-  const blocks = {}, items = {};
+  const blocks = {}, items = {}, components = {};
 
   for (const entry of sortedBlocks) {
     const defaultState = entry[1].states.find(c => c.default);
@@ -128,6 +130,10 @@ async function extractItemsAndBlocks () {
 
   for (const item in itemSource) {
     items[item.replace("minecraft:", "")] = itemSource[item].protocol_id;
+  }
+
+  for (const component in componentSource) {
+    components[component.replace("minecraft:", "").replaceAll("/", "_")] = componentSource[component].protocol_id;
   }
 
   /**
@@ -166,7 +172,7 @@ async function extractItemsAndBlocks () {
     blockRegistry[block.replace("minecraft:", "")] = blockRegistrySource[block].protocol_id;
   }
 
-  return { blocks, items, palette, mapping, mappingWithOverrides, blockRegistry };
+  return { blocks, items, components, palette, mapping, mappingWithOverrides, blockRegistry };
 
 }
 
@@ -459,6 +465,9 @@ ${Object.keys(itemsAndBlocks.palette).map((c, i) => `#define B_${c} ${i}`).join(
 
 // Item identifiers
 ${Object.entries(itemsAndBlocks.items).map(c => `#define I_${c[0]} ${c[1]}`).join("\n")}
+
+// Component type identifiers
+${Object.entries(itemsAndBlocks.components).map(c => `#define C_${c[0]} ${c[1]}`).join("\n")}
 
 // Biome identifiers
 ${biomes.map((c, i) => `#define W_${c} ${i}`).join("\n")}

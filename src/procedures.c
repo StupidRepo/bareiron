@@ -56,6 +56,18 @@ void resetPlayerData (PlayerData *player) {
   player->y = 80;
   player->flags |= 0x02;
   player->grounded_y = 0;
+#ifdef USE_ITEMSTACKS
+  for (int i = 0; i < 41; i ++) {
+    player->inventory[i].protocol_id = 0;
+    player->inventory[i].count = 0;
+    player->inventory[i].damage = 0;
+  }
+  for (int i = 0; i < 9; i ++) {
+    player->crafting[i].protocol_id = 0;
+    player->crafting[i].count = 0;
+    player->crafting[i].damage = 0;
+  }
+#else
   for (int i = 0; i < 41; i ++) {
     player->inventory_items[i] = 0;
     player->inventory_count[i] = 0;
@@ -64,6 +76,7 @@ void resetPlayerData (PlayerData *player) {
     player->craft_items[i] = 0;
     player->craft_count[i] = 0;
   }
+#endif
 }
 
 int reservePlayerData (int client_fd, uint8_t *uuid, char *name) {
@@ -236,7 +249,11 @@ int givePlayerItem (PlayerData *player, uint16_t item, uint8_t count) {
   uint8_t stack_size = getItemStackSize(item);
 
   for (int i = 0; i < 41; i ++) {
+#ifdef USE_ITEMSTACKS
+    if (player->inventory[i].protocol_id == item && player->inventory[i].count <= stack_size - count) {
+#else
     if (player->inventory_items[i] == item && player->inventory_count[i] <= stack_size - count) {
+#endif
       slot = i;
       break;
     }
@@ -244,7 +261,11 @@ int givePlayerItem (PlayerData *player, uint16_t item, uint8_t count) {
 
   if (slot == 255) {
     for (int i = 0; i < 41; i ++) {
+#ifdef USE_ITEMSTACKS
+      if (player->inventory[i].count == 0) {
+#else
       if (player->inventory_count[i] == 0) {
+#endif
         slot = i;
         break;
       }
@@ -254,9 +275,15 @@ int givePlayerItem (PlayerData *player, uint16_t item, uint8_t count) {
   // Fail to assign item if slot is outside of main inventory
   if (slot >= 36) return 1;
 
+#ifdef USE_ITEMSTACKS
+  player->inventory[slot].protocol_id = item;
+  player->inventory[slot].count += count;
+  sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, slot), player->inventory[slot]);
+#else
   player->inventory_items[slot] = item;
   player->inventory_count[slot] += count;
   sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, slot), player->inventory_count[slot], item);
+#endif
 
   return 0;
 
@@ -290,7 +317,11 @@ void spawnPlayer (PlayerData *player) {
 
   // Sync client inventory and hotbar
   for (uint8_t i = 0; i < 41; i ++) {
+#ifdef USE_ITEMSTACKS
+    sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, i), player->inventory[i]);
+#else
     sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, i), player->inventory_count[i], player->inventory_items[i]);
+#endif
   }
   sc_setHeldItem(player->client_fd, player->hotbar);
   // Sync client health and hunger
@@ -558,7 +589,20 @@ uint16_t getMiningResult (uint16_t held_item, uint8_t block) {
 
 // Rolls a random number to determine whether the player's tool should break
 void bumpToolDurability (PlayerData *player) {
+#ifdef USE_ITEMSTACKS
+  ItemStack *held_item = &player->inventory[player->hotbar];
 
+  held_item->damage += 1;
+  printf("Item %d durability: %d\n", held_item->protocol_id, held_item->damage);
+  // TODO: get max durability
+  if (held_item->damage >= 10) {
+    held_item->protocol_id = 0;
+    held_item->count = 0;
+    held_item->damage = 0;
+    sc_entityEvent(player->client_fd, player->client_fd, 47);
+  }
+  sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, player->hotbar), *held_item);
+#else
   uint16_t held_item = player->inventory_items[player->hotbar];
 
   // In order to avoid storing durability data, items break randomly with
@@ -578,13 +622,17 @@ void bumpToolDurability (PlayerData *player) {
     sc_entityEvent(player->client_fd, player->client_fd, 47);
     sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, player->hotbar), 0, 0);
   }
-
+#endif
 }
 
 // Checks whether the given block would be mined instantly with the held tool
 uint8_t isInstantlyMined (PlayerData *player, uint8_t block) {
 
+#ifdef USE_ITEMSTACKS
+  uint16_t held_item = player->inventory[player->hotbar].protocol_id;
+#else
   uint16_t held_item = player->inventory_items[player->hotbar];
+#endif
 
   if (
     block == B_snow ||
@@ -777,6 +825,12 @@ uint8_t getItemDefensePoints (uint16_t item) {
 // Calculates total defense points for the player's equipped armor
 uint8_t getPlayerDefensePoints (PlayerData *player) {
   return (
+#ifdef USE_ITEMSTACKS
+    getItemDefensePoints(player->inventory[39].protocol_id) + // Helmet
+    getItemDefensePoints(player->inventory[38].protocol_id) + // Chestplate
+    getItemDefensePoints(player->inventory[37].protocol_id) + // Leggings
+    getItemDefensePoints(player->inventory[36].protocol_id)   // Boots
+#else
     // Helmet
     getItemDefensePoints(player->inventory_items[39]) +
     // Chestplate
@@ -785,6 +839,7 @@ uint8_t getPlayerDefensePoints (PlayerData *player) {
     getItemDefensePoints(player->inventory_items[37]) +
     // Boots
     getItemDefensePoints(player->inventory_items[36])
+#endif
   );
 }
 
@@ -831,8 +886,13 @@ uint8_t handlePlayerEating (PlayerData *player, uint8_t just_check) {
   // Exit early if player is unable to eat
   if (player->hunger >= 20) return false;
 
+#ifdef USE_ITEMSTACKS
+  uint16_t *held_item = &player->inventory[player->hotbar].protocol_id;
+  uint8_t *held_count = &player->inventory[player->hotbar].count;
+#else
   uint16_t *held_item = &player->inventory_items[player->hotbar];
   uint8_t *held_count = &player->inventory_count[player->hotbar];
+#endif
 
   // Exit early if player isn't holding anything
   if (*held_item == 0 || *held_count == 0) return false;
@@ -870,11 +930,19 @@ uint8_t handlePlayerEating (PlayerData *player, uint8_t just_check) {
   // Update the client of these changes
   sc_entityEvent(player->client_fd, player->client_fd, 9);
   sc_setHealth(player->client_fd, player->health, player->hunger, player->saturation);
+#ifdef USE_ITEMSTACKS
+  sc_setContainerSlot(
+    player->client_fd,
+    0, serverSlotToClientSlot(0, player->hotbar),
+    player->inventory[player->hotbar]
+    );
+#else
   sc_setContainerSlot(
     player->client_fd, 0,
     serverSlotToClientSlot(0, player->hotbar),
     *held_count, *held_item
   );
+#endif
 
   return true;
 }
@@ -999,8 +1067,12 @@ void handlePlayerAction (PlayerData *player, int action, short x, short y, short
     sc_setContainerSlot(
       player->client_fd, 0,
       serverSlotToClientSlot(0, player->hotbar),
+#ifdef USE_ITEMSTACKS
+      player->inventory[player->hotbar]
+#else
       player->inventory_count[player->hotbar],
       player->inventory_items[player->hotbar]
+#endif
     );
     return;
   }
@@ -1030,7 +1102,11 @@ void handlePlayerAction (PlayerData *player, int action, short x, short y, short
   // Don't continue if the block change failed
   if (makeBlockChange(x, y, z, 0)) return;
 
+#ifdef USE_ITEMSTACKS
+  uint16_t held_item = player->inventory[player->hotbar].protocol_id;
+#else
   uint16_t held_item = player->inventory_items[player->hotbar];
+#endif
   uint16_t item = getMiningResult(held_item, block);
   bumpToolDurability(player);
 
@@ -1071,8 +1147,12 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
   // Get targeted block (if coordinates are provided)
   uint8_t target = face == 255 ? 0 : getBlockAt(x, y, z);
   // Get held item properties
+#ifdef USE_ITEMSTACKS
+  ItemStack *item = &player->inventory[player->hotbar];
+#else
   uint8_t *count = &player->inventory_count[player->hotbar];
   uint16_t *item = &player->inventory_items[player->hotbar];
+#endif
 
   // Check interaction with containers when not sneaking
   if (!(player->flags & 0x04) && face != 255) {
@@ -1084,13 +1164,26 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
       return;
     } else if (target == B_composter) {
       // Check if the player is holding anything
+#ifdef USE_ITEMSTACKS
+      if (item->count == 0) return;
+#else
       if (*count == 0) return;
+#endif
       // Check if the item is a valid compost item
+#ifdef USE_ITEMSTACKS
+      uint32_t compost_chance = isCompostItem(item->protocol_id);
+#else
       uint32_t compost_chance = isCompostItem(*item);
+#endif
       if (compost_chance != 0) {
         // Take away composted item
+#ifdef USE_ITEMSTACKS
+        if ((item->count -= 1) == 0) item->protocol_id = 0;
+        sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, player->hotbar), *item);
+#else
         if ((*count -= 1) == 0) *item = 0;
         sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, player->hotbar), *count, *item);
+#endif
         // Test compost chance and give bone meal on success
         if (fast_rand() < compost_chance) {
           givePlayerItem(player, I_bone_meal, 1);
@@ -1133,16 +1226,29 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
   }
 
   // If the selected slot doesn't hold any items, exit
+#ifdef USE_ITEMSTACKS
+  if (item->count == 0) return;
+#else
   if (*count == 0) return;
+#endif
 
   // Check special item handling
+#ifdef USE_ITEMSTACKS
+  if (item->protocol_id == I_bone_meal) {
+#else
   if (*item == I_bone_meal) {
+#endif
     uint8_t target_below = getBlockAt(x, y - 1, z);
     if (target == B_oak_sapling) {
       // Consume the bone meal (yes, even before checks)
       // Wasting bone meal on misplanted saplings is vanilla behavior
+#ifdef USE_ITEMSTACKS
+      if ((item->count -= 1) == 0) item->protocol_id = 0;
+      sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, player->hotbar), *item);
+#else
       if ((*count -= 1) == 0) *item = 0;
       sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, player->hotbar), *count, *item);
+#endif
       if ( // Saplings can only grow when placed on these blocks
         target_below == B_dirt ||
         target_below == B_grass_block ||
@@ -1157,11 +1263,28 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
     // Reset eating timer and set eating flag
     player->flagval_16 = 0;
     player->flags |= 0x10;
+
+#ifdef USE_ITEMSTACKS
+  } else if (getItemDefensePoints(item->protocol_id) != 0) {
+#else
   } else if (getItemDefensePoints(*item) != 0) {
+#endif
     // For some reason, this action is sent twice when looking at a block
     // Ignore the variant that has coordinates
     if (face != 255) return;
     // Swap to held piece of armor
+
+#ifdef USE_ITEMSTACKS
+    uint8_t slot = getArmorItemSlot(item->protocol_id);
+    ItemStack prev_item = player->inventory[slot];
+    player->inventory[slot] = *item;
+    player->inventory[slot].count = 1;
+    player->inventory[player->hotbar] = prev_item;
+    player->inventory[player->hotbar].count = 1;
+    // Update client inventory
+    sc_setContainerSlot(player->client_fd, -2, serverSlotToClientSlot(0, slot), *item);
+    sc_setContainerSlot(player->client_fd, -2, serverSlotToClientSlot(0, player->hotbar), prev_item);
+#else
     uint8_t slot = getArmorItemSlot(*item);
     uint16_t prev_item = player->inventory_items[slot];
     player->inventory_items[slot] = *item;
@@ -1171,6 +1294,7 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
     // Update client inventory
     sc_setContainerSlot(player->client_fd, -2, serverSlotToClientSlot(0, slot), 1, *item);
     sc_setContainerSlot(player->client_fd, -2, serverSlotToClientSlot(0, player->hotbar), 1, prev_item);
+#endif
     return;
   }
 
@@ -1178,7 +1302,11 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
   if (face == 255) return;
 
   // If the selected item doesn't correspond to a block, exit
+#ifdef USE_ITEMSTACKS
+  uint8_t block = I_to_B(item->protocol_id);
+#else
   uint8_t block = I_to_B(*item);
+#endif
   if (block == 0) return;
 
   switch (face) {
@@ -1204,10 +1332,15 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
   ) {
     // Apply server-side block change
     if (makeBlockChange(x, y, z, block)) return;
+#ifdef USE_ITEMSTACKS
+    item->count -= 1;
+    if (item->count == 0) item->protocol_id = 0;
+#else
     // Decrease item amount in selected slot
     *count -= 1;
     // Clear item id in slot if amount is zero
     if (*count == 0) *item = 0;
+#endif
     // Calculate fluid flow
     #ifdef DO_FLUID_FLOW
       checkFluidUpdate(x, y + 1, z, getBlockAt(x, y + 1, z));
@@ -1219,7 +1352,11 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
   }
 
   // Sync hotbar contents to player
+#ifdef USE_ITEMSTACKS
+  sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, player->hotbar), *item);
+#else
   sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, player->hotbar), *count, *item);
+#endif
 
 }
 
@@ -1271,7 +1408,11 @@ void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t da
     if (player->flags & 0x01) return;
 
     // Scale damage based on held item
+#ifdef USE_ITEMSTACKS
+    uint16_t held_item = player->inventory[player->hotbar].protocol_id;
+#else
     uint16_t held_item = player->inventory_items[player->hotbar];
+#endif
     if (held_item == I_wooden_sword) damage *= 4;
     else if (held_item == I_golden_sword) damage *= 4;
     else if (held_item == I_stone_sword) damage *= 5;
